@@ -39,6 +39,7 @@ jobs:
         if: steps.sync.outputs.exit_code == '0'
         uses: peter-evans/create-pull-request@v6
         with:
+          token: ${{ secrets.STORE_SYNC_PAT }}
           commit-message: "Add new Home Depot store(s) found in monthly sync"
           title: "Monthly store sync: new Home Depot location(s)"
           body: |
