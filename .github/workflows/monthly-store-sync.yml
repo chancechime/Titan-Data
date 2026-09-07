@@ -23,9 +23,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          pip install requests beautifulsoup4 lxml playwright
-          playwright install --with-deps chromium
+        run: pip install requests beautifulsoup4 lxml
 
       - name: Run store sync
         id: sync

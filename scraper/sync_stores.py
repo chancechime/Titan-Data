@@ -15,19 +15,22 @@ internal store numbers.
 This intentionally does NOT touch existing entries -- it only adds ones
 whose storeNumber isn't already a key in stores.json. It also does not
 attempt to discover Mexico stores via homedepot.com itself;
-homedepot.com.mx's site structure has not been verified (see the
-workflow's README note) -- Mexico coverage currently comes only from the
-OpenStreetMap cross-check.
+homedepot.com.mx's site structure has not been verified -- Mexico
+coverage currently comes only from the OpenStreetMap cross-check.
 
-Home Depot's human-facing pages sit behind Akamai Bot Manager, which
-fingerprints and blocks plain HTTP clients (confirmed: 403 "Pardon Our
-Interruption" responses with _abck/bm_sz cookies) regardless of headers.
-fetch() below tries a normal HTTP request first -- fine for machine-
-readable endpoints like sitemaps, which sites typically don't wall off --
-and only pays for a real headless-browser render when that gets blocked.
-Even that isn't guaranteed: Akamai also scores IP reputation, and GitHub
-Actions' runner IPs are well-known cloud ranges that can get flagged
-regardless of what the browser fingerprint looks like.
+Home Depot's human-facing pages sit behind Akamai Bot Manager, confirmed
+(via real captured evidence, not assumption -- a soft "Oops!! Something
+went wrong" error page, window.digitalData reporting pageName "error
+page", and Akamai bot-sensor beacon URLs in network captures) to block
+every automated technique tried against it: plain HTTP clients, Playwright,
+and even puppeteer-extra-plugin-stealth with a full rendered browser. So
+this script does NOT try a headless browser here -- that was tried for
+real, with stronger stealth tooling than this project has, and still hit
+the same wall. It only tries a plain HTTP request, which works for
+machine-readable endpoints (sitemaps) that sites don't typically wall off,
+and treats an individual store page it can't fetch as a manual-lookup
+item (we still know the store NUMBER from the URL itself, just not the
+address) rather than silently dropping it.
 
 Exit codes:
   0 - ran fine, report written (new_stores/needs_manual_lookup may be empty)
@@ -53,62 +56,21 @@ from bs4 import BeautifulSoup
 STORES_PATH = Path(__file__).resolve().parent.parent / "stores.json"
 REPORT_PATH = Path("sync_report.json")
 
-BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-)
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; TitanDataStoreSync/1.0; +https://titanwft.net)"}
 REQUEST_DELAY_SECONDS = 0.5
 REQUEST_TIMEOUT_SECONDS = 20
-BROWSER_TIMEOUT_MS = 30000
 
 COUNTRY_ORDER = {"USA": 0, "CAN": 1, "MEX": 2}
 
 US_STORE_URL_RE = re.compile(r"/l/[^/]+/[A-Z]{2}/[^/]+/[\w-]+/(\d{3,5})(?:/|$)")
 CA_STORE_URL_RE = re.compile(r"-([a-z]{2})-hs(\d{3,5})\.html$")
 
-_browser_state: dict = {"playwright": None, "browser": None}
-
-
-def _get_browser():
-    if _browser_state["browser"] is None:
-        from playwright.sync_api import sync_playwright
-
-        pw = sync_playwright().start()
-        _browser_state["playwright"] = pw
-        _browser_state["browser"] = pw.chromium.launch(
-            args=["--disable-blink-features=AutomationControlled"]
-        )
-    return _browser_state["browser"]
-
-
-def close_browser() -> None:
-    if _browser_state["browser"] is not None:
-        _browser_state["browser"].close()
-        _browser_state["playwright"].stop()
-        _browser_state["browser"] = None
-        _browser_state["playwright"] = None
-
 
 def fetch(url: str) -> str:
-    """Fetch a URL as text, plain HTTP first, headless-browser render as fallback."""
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
-        if resp.status_code < 400:
-            time.sleep(REQUEST_DELAY_SECONDS)
-            return resp.text
-    except requests.RequestException:
-        pass
-
-    page = _get_browser().new_page(user_agent=BROWSER_USER_AGENT)
-    try:
-        response = page.goto(url, wait_until="networkidle", timeout=BROWSER_TIMEOUT_MS)
-        if response is None or response.status >= 400:
-            status = response.status if response else "no response"
-            raise RuntimeError(f"browser fetch also failed for {url} (status {status})")
-        return response.text()
-    finally:
-        page.close()
+    resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    time.sleep(REQUEST_DELAY_SECONDS)
+    return resp.text
 
 
 def sort_key(entry: dict) -> tuple:
@@ -129,7 +91,8 @@ def save_stores(data: dict) -> None:
 
 def discover_us_store_urls(failures: list[str]) -> set[str]:
     """Sitemap first (machine-readable, usually not walled off); crawl the
-    public directory as a fallback if the sitemap has moved or changed shape."""
+    public directory as a fallback if the sitemap has moved or changed shape.
+    Both are plain HTTP -- see the module docstring on why no browser fallback."""
     urls: set[str] = set()
 
     try:
@@ -180,7 +143,9 @@ def parse_store_page(url: str) -> dict | None:
 
     JSON-LD is what these pages already publish for Google's own use (rich
     results / the Maps knowledge panel), so it's the same structured data
-    Google itself reads -- more reliable than scraping visible page text.
+    Google itself reads. This is still a plain HTTP GET, so it can fail
+    even when the sitemap listing it came from didn't -- Akamai can wall
+    off individual pages more aggressively than the sitemap itself.
     """
     soup = BeautifulSoup(fetch(url), "html.parser")
     for script in soup.find_all("script", type="application/ld+json"):
@@ -251,6 +216,7 @@ def discover_osm_candidates(failures: list[str]) -> list[dict]:
                 "state": (tags.get("addr:state") or "").strip(),
                 "zip": (tags.get("addr:postcode") or "").strip(),
                 "country": OSM_COUNTRY_MAP.get(country_code, country_code or None),
+                "url": None,
             }
         )
     return candidates
@@ -260,47 +226,63 @@ def _addr_key(entry: dict) -> tuple:
     return (entry.get("zip", "").strip().lower(), entry.get("streetAddress", "").strip().lower())
 
 
+def _hd_new_store_candidates(
+    urls: set[str], url_re: re.Pattern, number_group: int, country: str, existing_numbers: set[str]
+) -> tuple[dict, list]:
+    """For each candidate URL not already in stores.json, try to pull the
+    full address. If Home Depot blocks that individual page, we still know
+    the real store NUMBER (it's in the URL itself, confirmed straight from
+    Home Depot's own sitemap) -- report that as a manual-lookup item with a
+    link, instead of silently discarding a confirmed new store."""
+    found: dict[str, dict] = {}
+    lookups: list[dict] = []
+
+    for url in sorted(urls):
+        m = url_re.search(url)
+        if not m:
+            continue
+        store_number = m.group(number_group).zfill(4)
+        if store_number in existing_numbers:
+            continue
+
+        parsed = parse_store_page(url)
+        if parsed and parsed["state"] and parsed["zip"]:
+            parsed.update(storeNumber=store_number, country=country)
+            found[store_number] = parsed
+        else:
+            lookups.append(
+                {
+                    "storeNumber": store_number,
+                    "storeName": "The Home Depot",
+                    "streetAddress": "",
+                    "city": "",
+                    "state": "",
+                    "zip": "",
+                    "country": country,
+                    "url": url,
+                }
+            )
+
+    return found, lookups
+
+
 def main() -> None:
     data = load_stores()
     existing_numbers = set(data.keys())
     failures: list[str] = []
     new_entries: dict[str, dict] = {}
-    us_urls: set[str] = set()
-    ca_urls: set[str] = set()
+    needs_manual_lookup: list[dict] = []
 
-    try:
-        us_urls = discover_us_store_urls(failures)
-        ca_urls = discover_ca_store_urls(failures)
+    us_urls = discover_us_store_urls(failures)
+    ca_urls = discover_ca_store_urls(failures)
 
-        for url in sorted(us_urls):
-            m = US_STORE_URL_RE.search(url)
-            if not m:
-                continue
-            store_number = m.group(1).zfill(4)
-            if store_number in existing_numbers:
-                continue
-            parsed = parse_store_page(url)
-            if not parsed or not parsed["state"] or not parsed["zip"]:
-                failures.append(f"Could not parse a full address for candidate new store at {url}")
-                continue
-            parsed.update(storeNumber=store_number, country="USA")
-            new_entries[store_number] = parsed
+    us_found, us_lookups = _hd_new_store_candidates(us_urls, US_STORE_URL_RE, 1, "USA", existing_numbers)
+    new_entries.update(us_found)
+    needs_manual_lookup.extend(us_lookups)
 
-        for url in sorted(ca_urls):
-            m = CA_STORE_URL_RE.search(url)
-            if not m:
-                continue
-            store_number = m.group(2).zfill(4)
-            if store_number in existing_numbers:
-                continue
-            parsed = parse_store_page(url)
-            if not parsed or not parsed["state"] or not parsed["zip"]:
-                failures.append(f"Could not parse a full address for candidate new store at {url}")
-                continue
-            parsed.update(storeNumber=store_number, country="CAN")
-            new_entries[store_number] = parsed
-    finally:
-        close_browser()
+    ca_found, ca_lookups = _hd_new_store_candidates(ca_urls, CA_STORE_URL_RE, 2, "CAN", existing_numbers)
+    new_entries.update(ca_found)
+    needs_manual_lookup.extend(ca_lookups)
 
     # OpenStreetMap cross-check: runs every time, independent of whether
     # Home Depot's own site cooperated above. Never overwrites a store
@@ -308,14 +290,13 @@ def main() -> None:
     # confirmed real store number, OSM's ref tag is a distant second best.
     existing_addr_keys = {_addr_key(v) for v in data.values()}
     new_entry_addr_keys = {_addr_key(v) for v in new_entries.values()}
-    needs_manual_lookup: list[dict] = []
 
     for cand in discover_osm_candidates(failures):
         key = _addr_key(cand)
         if key in existing_addr_keys or key in new_entry_addr_keys:
             continue  # already tracked, or already found via Home Depot itself this run
         if cand["storeNumber"] and cand["country"] and cand["storeNumber"] not in existing_numbers:
-            new_entries[cand["storeNumber"]] = {k: v for k, v in cand.items()}
+            new_entries[cand["storeNumber"]] = {k: v for k, v in cand.items() if k != "url"}
             new_entry_addr_keys.add(key)
         else:
             needs_manual_lookup.append(cand)

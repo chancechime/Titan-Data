@@ -38,9 +38,19 @@ ROW = """<tr>
   <td style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;">{country}</td>
 </tr>"""
 
-LOOKUP_ROW = """<tr>
-  <td style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;">{streetAddress}, {city}, {state} {zip}</td>
-  <td style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;">{country}</td>
+def _lookup_row(v: dict) -> str:
+    if v.get("url"):
+        # Found via Home Depot's own sitemap -- store number is confirmed,
+        # the individual page just couldn't be fetched. A human clicking
+        # the link isn't blocked the way the automation is.
+        what = f'Store #{v["storeNumber"]} — <a href="{v["url"]}" style="color:#f96302;">view on homedepot.com &rarr;</a>'
+    else:
+        # Found via OpenStreetMap -- we have an address but no confirmed
+        # Home Depot store number.
+        what = f'{v["streetAddress"]}, {v["city"]}, {v["state"]} {v["zip"]}'
+    return f"""<tr>
+  <td style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;">{what}</td>
+  <td style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;">{v.get("country") or ""}</td>
 </tr>"""
 
 
@@ -77,15 +87,17 @@ def render(report: dict, pr_url: str) -> str:
         )
 
     if needs_manual_lookup:
-        rows = "".join(LOOKUP_ROW.format(**v) for v in needs_manual_lookup)
+        rows = "".join(_lookup_row(v) for v in needs_manual_lookup)
         body += f"""
         <p style="font-size:14px;margin-top:20px;">Found <strong>{len(needs_manual_lookup)}</strong>
-        possible new location(s) on OpenStreetMap with no confirmed Home Depot store number yet --
-        these were <strong>not</strong> added to <code>stores.json</code>. Look each address up on
-        Home Depot's own store locator to get the store number, then add it by hand:</p>
+        possible new location(s) that couldn't be fully confirmed automatically -- these were
+        <strong>not</strong> added to <code>stores.json</code>. Where a store number is shown, it's
+        confirmed from Home Depot's own sitemap; click through to get the address. Where only an
+        address is shown (from OpenStreetMap), look it up on Home Depot's store locator to get the
+        store number. Then add either by hand:</p>
         <table style="width:100%;border-collapse:collapse;">
           <tr>
-            <th style="text-align:left;padding:8px 10px;font-size:12px;color:#888;border-bottom:2px solid #eee;">Address</th>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:#888;border-bottom:2px solid #eee;">Details</th>
             <th style="text-align:left;padding:8px 10px;font-size:12px;color:#888;border-bottom:2px solid #eee;">Country</th>
           </tr>
           {rows}
