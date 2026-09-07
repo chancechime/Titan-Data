@@ -31,7 +31,7 @@ jobs:
         # treated as a hard failure below rather than "zero new stores".
         run: |
           set +e
-          python scripts/sync_stores.py
+          python scraper/sync_stores.py
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
       - name: Create pull request for new stores
@@ -53,7 +53,7 @@ jobs:
 
       - name: Build email report
         if: always()
-        run: python scripts/build_email_report.py --pr-url "${{ steps.pr.outputs.pull-request-url }}"
+        run: python scraper/build_email_report.py --pr-url "${{ steps.pr.outputs.pull-request-url }}"
 
       - name: Upload sync report artifact
         if: always()
