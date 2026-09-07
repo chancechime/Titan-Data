@@ -89,27 +89,67 @@ def save_stores(data: dict) -> None:
         f.write("\n")
 
 
+def _parse_sitemap_locs(xml_text: str) -> list[str]:
+    root = ET.fromstring(xml_text)
+    ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    return [loc.text for loc in root.findall(".//sm:loc", ns) if loc.text]
+
+
+def discover_sitemap_url_from_robots(base_url: str) -> list[str]:
+    """robots.txt is where sites actually declare their sitemap location --
+    more robust than guessing a path, since it's meant for exactly this."""
+    try:
+        text = fetch(f"{base_url}/robots.txt")
+    except Exception:  # noqa: BLE001
+        return []
+    return [line.split(":", 1)[1].strip() for line in text.splitlines() if line.lower().startswith("sitemap:")]
+
+
+# Confirmed real path (from a working scraper that actually parsed it), not a
+# guess -- Home Depot's "store" sitemap is filed under LocalCityPages, which
+# doesn't contain the words "store" or "location" so a substring filter over
+# the sitemap index misses it entirely.
+US_KNOWN_SITEMAP_URLS = ["https://www.homedepot.com/sitemap/LocalCityPages/LCP-0.xml"]
+
+
 def discover_us_store_urls(failures: list[str]) -> set[str]:
-    """Sitemap first (machine-readable, usually not walled off); crawl the
-    public directory as a fallback if the sitemap has moved or changed shape.
-    Both are plain HTTP -- see the module docstring on why no browser fallback."""
+    """Known-good sitemap URL first; robots.txt-declared sitemaps second
+    (in case Home Depot moves it again); directory crawl as a last resort.
+    All plain HTTP -- see the module docstring on why no browser fallback."""
     urls: set[str] = set()
 
-    try:
-        root = ET.fromstring(fetch("https://www.homedepot.com/sitemap/main.xml"))
-        ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-        sub_sitemaps = [loc.text for loc in root.findall(".//sm:loc", ns) if loc.text]
-        candidates = [u for u in sub_sitemaps if "store" in u.lower() or "location" in u.lower()]
-        for sm_url in candidates:
-            sm_root = ET.fromstring(fetch(sm_url))
-            for loc in sm_root.findall(".//sm:loc", ns):
-                if loc.text and US_STORE_URL_RE.search(loc.text):
-                    urls.add(loc.text)
-    except Exception as e:  # noqa: BLE001 - any failure here just means "try the fallback"
-        failures.append(f"US sitemap discovery failed ({e}); fell back to directory crawl")
+    sitemap_candidates = list(US_KNOWN_SITEMAP_URLS)
+    sitemap_candidates += [
+        u for u in discover_sitemap_url_from_robots("https://www.homedepot.com") if u not in sitemap_candidates
+    ]
+
+    for sitemap_url in sitemap_candidates:
+        try:
+            locs = _parse_sitemap_locs(fetch(sitemap_url))
+        except Exception as e:  # noqa: BLE001
+            failures.append(f"US sitemap fetch failed for {sitemap_url} ({e})")
+            continue
+
+        direct_hits = [loc for loc in locs if US_STORE_URL_RE.search(loc)]
+        if direct_hits:
+            urls.update(direct_hits)
+            continue
+
+        # Not a leaf sitemap -- likely a sitemap index. Recurse one level.
+        for child_url in locs:
+            if not child_url.endswith(".xml"):
+                continue
+            try:
+                for loc in _parse_sitemap_locs(fetch(child_url)):
+                    if US_STORE_URL_RE.search(loc):
+                        urls.add(loc)
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"US child sitemap fetch failed for {child_url} ({e})")
 
     if urls:
         return urls
+
+    failures.append("US sitemap discovery found no store URLs from any known/declared sitemap; falling back to directory crawl")
 
     try:
         soup = BeautifulSoup(fetch("https://www.homedepot.com/l/storeDirectory"), "html.parser")
@@ -130,12 +170,27 @@ def discover_us_store_urls(failures: list[str]) -> set[str]:
 
 
 def discover_ca_store_urls(failures: list[str]) -> set[str]:
-    try:
-        soup = BeautifulSoup(fetch("https://stores.homedepot.ca/sitemap.xml"), "xml")
-        return {loc.text for loc in soup.find_all("loc") if loc.text and CA_STORE_URL_RE.search(loc.text)}
-    except Exception as e:  # noqa: BLE001
-        failures.append(f"CA sitemap discovery failed ({e}) -- no Canadian stores checked this run")
-        return set()
+    candidates = ["https://stores.homedepot.ca/sitemap.xml"]
+    candidates += [
+        u for u in discover_sitemap_url_from_robots("https://stores.homedepot.ca") if u not in candidates
+    ]
+
+    urls: set[str] = set()
+    errors: list[str] = []
+    for sitemap_url in candidates:
+        try:
+            soup = BeautifulSoup(fetch(sitemap_url), "xml")
+            hits = {loc.text for loc in soup.find_all("loc") if loc.text and CA_STORE_URL_RE.search(loc.text)}
+            if hits:
+                urls.update(hits)
+                break
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{sitemap_url} ({e})")
+
+    if not urls and errors:
+        failures.append(f"CA sitemap discovery failed -- no Canadian stores checked this run: {'; '.join(errors)}")
+
+    return urls
 
 
 def parse_store_page(url: str) -> dict | None:
@@ -192,7 +247,15 @@ def discover_osm_candidates(failures: list[str]) -> list[dict]:
     candidate without one is reported for manual lookup, never guessed at.
     """
     try:
-        resp = requests.post(OVERPASS_URL, data={"data": OVERPASS_QUERY}, timeout=200)
+        # Overpass's public instance returns 406 for requests that don't
+        # look like they come from an identified client -- a bare
+        # requests.post() with no headers was hitting exactly that.
+        resp = requests.post(
+            OVERPASS_URL,
+            data={"data": OVERPASS_QUERY},
+            headers=HEADERS,
+            timeout=200,
+        )
         resp.raise_for_status()
         elements = resp.json().get("elements", [])
     except Exception as e:  # noqa: BLE001
