@@ -18,10 +18,11 @@ does:
   - OpenStreetMap's Overpass API (free, no key). Store numbers here come
     from an optional `ref` tag some mappers add -- less consistent than
     Overture, kept as an extra cross-check.
-A candidate with a confirmed store number gets added the same way a
-Home Depot-sourced find does; one without gets reported for manual lookup
-rather than guessed at, since neither source is authoritative on Home
-Depot's own internal store numbers.
+A candidate only gets auto-added if EVERY field is present and non-empty
+(storeNumber, storeName, streetAddress, city, state, zip, country) --
+see has_full_details(). A confirmed store number with a partial address
+is not enough; anything incomplete goes to manual lookup instead, never
+partially included.
 
 This intentionally does NOT touch existing entries -- it only adds ones
 whose storeNumber isn't already a key in stores.json. It also does not
@@ -73,6 +74,15 @@ REQUEST_DELAY_SECONDS = 0.5
 REQUEST_TIMEOUT_SECONDS = 20
 
 COUNTRY_ORDER = {"USA": 0, "CAN": 1, "MEX": 2}
+
+REQUIRED_STORE_FIELDS = ["storeNumber", "storeName", "streetAddress", "city", "state", "zip", "country"]
+
+
+def has_full_details(entry: dict) -> bool:
+    """A candidate only gets auto-added if every field is present and
+    non-empty -- storeNumber and an address alone aren't enough. Anything
+    incomplete goes to manual lookup instead, never partially included."""
+    return all(str(entry.get(f) or "").strip() for f in REQUIRED_STORE_FIELDS)
 
 US_STORE_URL_RE = re.compile(r"/l/[^/]+/[A-Z]{2}/[^/]+/[\w-]+/(\d{3,5})(?:[/?]|$)")
 CA_STORE_URL_RE = re.compile(r"-([a-z]{2})-(?:hs)?(\d{3,5})\.html")
@@ -435,8 +445,9 @@ def _hd_new_store_candidates(
             continue
 
         parsed = parse_store_page(url)
-        if parsed and parsed["state"] and parsed["zip"]:
+        if parsed:
             parsed.update(storeNumber=store_number, country=country)
+        if parsed and has_full_details(parsed):
             found[store_number] = parsed
         else:
             lookups.append(
@@ -480,8 +491,6 @@ def main() -> None:
     existing_addr_keys = {_addr_key(v) for v in data.values()}
     new_entry_addr_keys = {_addr_key(v) for v in new_entries.values()}
 
-    STORE_FIELDS = {"storeNumber", "storeName", "streetAddress", "city", "state", "zip", "country"}
-
     for cand in discover_overture_candidates(failures) + discover_osm_candidates(failures):
         key = _addr_key(cand)
         already_tracked = (
@@ -492,8 +501,8 @@ def main() -> None:
         )
         if already_tracked:
             continue
-        if cand["storeNumber"] and cand["country"]:
-            new_entries[cand["storeNumber"]] = {k: v for k, v in cand.items() if k in STORE_FIELDS}
+        if has_full_details(cand):
+            new_entries[cand["storeNumber"]] = {k: v for k, v in cand.items() if k in REQUIRED_STORE_FIELDS}
             new_entry_addr_keys.add(key)
         else:
             needs_manual_lookup.append(cand)
