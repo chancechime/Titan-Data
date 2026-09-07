@@ -1,0 +1,81 @@
+name: Monthly Home Depot Store Sync
+
+on:
+  schedule:
+    # 06:00 UTC on the 1st of every month.
+    - cron: "0 6 1 * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml
+
+      - name: Run store sync
+        id: sync
+        # Exit code 2 means discovery came back empty for every source --
+        # treated as a hard failure below rather than "zero new stores".
+        run: |
+          set +e
+          python scripts/sync_stores.py
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Create pull request for new stores
+        id: pr
+        if: steps.sync.outputs.exit_code == '0'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "Add new Home Depot store(s) found in monthly sync"
+          title: "Monthly store sync: new Home Depot location(s)"
+          body: |
+            Automated monthly sync of `stores.json` against Home Depot's own
+            store location pages. See the emailed report for details, or
+            `sync_report.json` in the workflow run artifacts.
+
+            Please review the new address data before merging.
+          branch: automated/store-sync-${{ github.run_number }}
+          add-paths: stores.json
+          labels: automated-store-sync
+
+      - name: Build email report
+        if: always()
+        run: python scripts/build_email_report.py --pr-url "${{ steps.pr.outputs.pull-request-url }}"
+
+      - name: Upload sync report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-report
+          path: |
+            sync_report.json
+            email_report.html
+          retention-days: 90
+
+      - name: Email report
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.STORE_SYNC_SMTP_HOST }}
+          server_port: ${{ secrets.STORE_SYNC_SMTP_PORT }}
+          username: ${{ secrets.STORE_SYNC_SMTP_USER }}
+          password: ${{ secrets.STORE_SYNC_SMTP_PASS }}
+          subject: >-
+            ${{ steps.sync.outputs.exit_code == '0' && 'Titan Data - Monthly Store Sync' ||
+            'Titan Data - Monthly Store Sync FAILED' }}
+          to: chance@titanwft.net
+          from: Titan Data Sync
+          html_body: file://email_report.html
