@@ -32,6 +32,7 @@ This repo exists to store and maintain the normalized Home Depot store directory
 
 **Required repo secrets** (Settings -> Secrets and variables -> Actions):
 - `STORE_SYNC_SMTP_HOST`, `STORE_SYNC_SMTP_PORT`, `STORE_SYNC_SMTP_USER`, `STORE_SYNC_SMTP_PASS` — SMTP credentials the workflow sends the report through.
+- `STORE_SYNC_PAT` — a GitHub [personal access token](https://github.com/settings/tokens) (classic, `repo` scope, or a fine-grained token with Contents + Pull requests read/write on this repo) used to open the pull request. The default `GITHUB_TOKEN` can create the PR, but GitHub blocks PRs opened with it from triggering other workflows (e.g. required CI checks) on themselves — a PAT avoids that restriction.
 
 **Why there's no browser automation against homedepot.com:** its site runs Akamai Bot Manager, tested for real (not assumed) across a separate scraping project that tried Playwright, plain HTTP, and puppeteer-extra-plugin-stealth with a fully rendered browser — every technique got served the same soft-block error page. A browser-automation fallback would cost real CI time for effectively no chance of working, so `sync_stores.py` only ever makes plain HTTP requests to homedepot.com, which work for the sitemap (a machine-readable endpoint most sites don't wall off) even though the individual store pages sometimes still get blocked.
 
