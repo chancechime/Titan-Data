@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   sync:
@@ -34,27 +33,22 @@ jobs:
           python scraper/sync_stores.py
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
-      - name: Create pull request for new stores
-        id: pr
+      - name: Commit and push new stores directly to main
+        id: commit
         if: steps.sync.outputs.exit_code == '0'
-        uses: peter-evans/create-pull-request@v6
+        uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          token: ${{ secrets.PAT_TOKEN }}
-          commit-message: "Add new Home Depot store(s) found in monthly sync"
-          title: "Monthly store sync: new Home Depot location(s)"
-          body: |
-            Automated monthly sync of `stores.json` against Home Depot's own
-            store location pages. See the emailed report for details, or
-            `sync_report.json` in the workflow run artifacts.
-
-            Please review the new address data before merging.
-          branch: automated/store-sync-${{ github.run_number }}
-          add-paths: stores.json
-          labels: automated-store-sync
+          commit_message: "Add new Home Depot store(s) found in monthly sync"
+          file_pattern: stores.json
 
       - name: Build email report
         if: always()
-        run: python scraper/build_email_report.py --pr-url "${{ steps.pr.outputs.pull-request-url }}"
+        run: |
+          COMMIT_URL=""
+          if [ "${{ steps.commit.outputs.changes_detected }}" = "true" ]; then
+            COMMIT_URL="https://github.com/${{ github.repository }}/commit/${{ steps.commit.outputs.commit_hash }}"
+          fi
+          python scraper/build_email_report.py --commit-url "$COMMIT_URL"
 
       - name: Upload sync report artifact
         if: always()

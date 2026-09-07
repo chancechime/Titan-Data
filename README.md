@@ -24,7 +24,7 @@ This repo exists to store and maintain the normalized Home Depot store directory
 
 ## Monthly store sync (automated)
 
-`.github/workflows/monthly-store-sync.yml` runs on the 1st of each month (and can be run manually via workflow_dispatch). `scraper/sync_stores.py` checks three independent sources for Home Depot locations not yet in `stores.json`, opens a pull request with anything it can fully confirm, and emails a report to chance@titanwft.net either way:
+`.github/workflows/monthly-store-sync.yml` runs on the 1st of each month (and can be run manually via workflow_dispatch). `scraper/sync_stores.py` checks three independent sources for Home Depot locations not yet in `stores.json`, **commits anything it can fully confirm directly to `main`** (no PR, no manual review step), and emails a report to chance@titanwft.net either way:
 
 1. **Home Depot's own sitemap** (`homedepot.com`/`stores.homedepot.ca`) — the single most authoritative source when it's reachable, but it sits behind Akamai Bot Manager (see below) and can be blocked.
 2. **Overture Maps Foundation's public places dataset** — an open data lake (Parquet on S3, `s3://overturemaps-us-west-2`) published specifically for bulk/automated consumption, not a live API that treats crawling as abuse. In practice this is the most reliable and complete source: the large majority of its US/Canada Home Depot listings carry a `homedepot.com` store URL with the real store number embedded, obtained independently of homedepot.com itself. No API key, no billing, no rate limiting tuned against cloud CI traffic.
@@ -32,7 +32,8 @@ This repo exists to store and maintain the normalized Home Depot store directory
 
 **Required repo secrets** (Settings -> Secrets and variables -> Actions):
 - `STORE_SYNC_SMTP_HOST`, `STORE_SYNC_SMTP_PORT`, `STORE_SYNC_SMTP_USER`, `STORE_SYNC_SMTP_PASS` — SMTP credentials the workflow sends the report through.
-- `STORE_SYNC_PAT` — a GitHub [personal access token](https://github.com/settings/tokens) (classic, `repo` scope, or a fine-grained token with Contents + Pull requests read/write on this repo) used to open the pull request. The default `GITHUB_TOKEN` can create the PR, but GitHub blocks PRs opened with it from triggering other workflows (e.g. required CI checks) on themselves — a PAT avoids that restriction.
+
+**Why direct-to-main and not a PR:** by request — a human review gate before every merge wasn't wanted. The compensating control is `has_full_details()` in `sync_stores.py`: a candidate is only committed if storeNumber, storeName, streetAddress, city, state, zip, AND country are all present and non-empty. Anything incomplete goes to the emailed manual-lookup list instead of being committed. That check is the only gate now, so if it ever needs to get stricter, that's the function to change — there's no review step downstream to catch a bad entry after this point.
 
 **Why there's no browser automation against homedepot.com:** its site runs Akamai Bot Manager, tested for real (not assumed) across a separate scraping project that tried Playwright, plain HTTP, and puppeteer-extra-plugin-stealth with a fully rendered browser — every technique got served the same soft-block error page. A browser-automation fallback would cost real CI time for effectively no chance of working, so `sync_stores.py` only ever makes plain HTTP requests to homedepot.com, which work for the sitemap (a machine-readable endpoint most sites don't wall off) even though the individual store pages sometimes still get blocked.
 

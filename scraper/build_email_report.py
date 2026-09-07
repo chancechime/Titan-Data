@@ -54,22 +54,23 @@ def _lookup_row(v: dict) -> str:
 </tr>"""
 
 
-def render(report: dict, pr_url: str) -> str:
+def render(report: dict, commit_url: str) -> str:
     new_stores = report.get("new_stores", {})
     needs_manual_lookup = report.get("needs_manual_lookup", [])
     failures = report.get("failures", [])
 
     if new_stores:
         rows = "".join(ROW.format(**v) for v in new_stores.values())
-        pr_line = (
+        commit_line = (
             f'<p style="font-size:13px;margin-top:16px;">'
-            f'<a href="{pr_url}" style="color:#f96302;">Review the pull request &rarr;</a></p>'
-            if pr_url
+            f'<a href="{commit_url}" style="color:#f96302;">View the commit &rarr;</a></p>'
+            if commit_url
             else ""
         )
         body = f"""
-        <p style="font-size:14px;">Found <strong>{len(new_stores)}</strong> new Home Depot store(s) not yet in
-        <code>stores.json</code>:</p>
+        <p style="font-size:14px;">Added <strong>{len(new_stores)}</strong> new Home Depot store(s) to
+        <code>stores.json</code> directly (each one had every required field confirmed, so no manual
+        review gate before committing):</p>
         <table style="width:100%;border-collapse:collapse;">
           <tr>
             <th style="text-align:left;padding:8px 10px;font-size:12px;color:#888;border-bottom:2px solid #eee;">Store #</th>
@@ -78,7 +79,7 @@ def render(report: dict, pr_url: str) -> str:
           </tr>
           {rows}
         </table>
-        {pr_line}
+        {commit_line}
         """
     else:
         body = (
@@ -116,14 +117,14 @@ def render(report: dict, pr_url: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pr-url", default="")
+    parser.add_argument("--commit-url", default="")
     args = parser.parse_args()
 
     report = json.loads(REPORT_PATH.read_text()) if REPORT_PATH.exists() else {
         "new_stores": {},
         "failures": ["sync_report.json was missing -- sync_stores.py may have crashed before writing it"],
     }
-    OUTPUT_PATH.write_text(render(report, args.pr_url))
+    OUTPUT_PATH.write_text(render(report, args.commit_url))
 
 
 if __name__ == "__main__":
