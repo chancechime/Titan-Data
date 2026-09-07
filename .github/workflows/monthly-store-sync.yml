@@ -1,4 +1,4 @@
-Pname: Monthly Home Depot Store Sync
+name: Monthly Home Depot Store Sync
 
 on:
   schedule:
