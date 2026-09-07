@@ -38,9 +38,15 @@ ROW = """<tr>
   <td style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;">{country}</td>
 </tr>"""
 
+LOOKUP_ROW = """<tr>
+  <td style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;">{streetAddress}, {city}, {state} {zip}</td>
+  <td style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;">{country}</td>
+</tr>"""
+
 
 def render(report: dict, pr_url: str) -> str:
     new_stores = report.get("new_stores", {})
+    needs_manual_lookup = report.get("needs_manual_lookup", [])
     failures = report.get("failures", [])
 
     if new_stores:
@@ -69,6 +75,22 @@ def render(report: dict, pr_url: str) -> str:
             '<p style="font-size:14px;">No new stores found this month. '
             "<code>stores.json</code> is unchanged.</p>"
         )
+
+    if needs_manual_lookup:
+        rows = "".join(LOOKUP_ROW.format(**v) for v in needs_manual_lookup)
+        body += f"""
+        <p style="font-size:14px;margin-top:20px;">Found <strong>{len(needs_manual_lookup)}</strong>
+        possible new location(s) on OpenStreetMap with no confirmed Home Depot store number yet --
+        these were <strong>not</strong> added to <code>stores.json</code>. Look each address up on
+        Home Depot's own store locator to get the store number, then add it by hand:</p>
+        <table style="width:100%;border-collapse:collapse;">
+          <tr>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:#888;border-bottom:2px solid #eee;">Address</th>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:#888;border-bottom:2px solid #eee;">Country</th>
+          </tr>
+          {rows}
+        </table>
+        """
 
     if failures:
         items = "".join(f'<li style="font-size:13px;color:#a33;">{f}</li>' for f in failures)

@@ -5,12 +5,19 @@ Finds Home Depot store location pages published by Home Depot for the US
 (homedepot.com) and Canada (stores.homedepot.ca), compares their store
 numbers against stores.json, and appends any genuinely new stores in the
 file's existing sort order (country: USA, CAN, MEX; then state/province;
-then streetAddress).
+then streetAddress). Every run also cross-checks OpenStreetMap's Overpass
+API (free, no key, not behind Akamai) for Home Depot locations not yet in
+stores.json -- a candidate with a usable store number (an OSM `ref` tag)
+gets added the same way; one without gets reported for manual lookup
+rather than guessed at, since OSM is not the authority on Home Depot's own
+internal store numbers.
 
 This intentionally does NOT touch existing entries -- it only adds ones
 whose storeNumber isn't already a key in stores.json. It also does not
-attempt to discover Mexico stores; homedepot.com.mx's site structure has
-not been verified (see the workflow's README note).
+attempt to discover Mexico stores via homedepot.com itself;
+homedepot.com.mx's site structure has not been verified (see the
+workflow's README note) -- Mexico coverage currently comes only from the
+OpenStreetMap cross-check.
 
 Home Depot's human-facing pages sit behind Akamai Bot Manager, which
 fingerprints and blocks plain HTTP clients (confirmed: 403 "Pardon Our
@@ -23,12 +30,12 @@ Actions' runner IPs are well-known cloud ranges that can get flagged
 regardless of what the browser fingerprint looks like.
 
 Exit codes:
-  0 - ran fine, report written (new_stores may be empty)
-  2 - discovery came back completely empty for both countries, which
-      almost certainly means Home Depot changed their site structure
-      or started blocking automated requests rather than that zero
-      stores exist -- the workflow treats this as a hard failure and
-      sends an alert instead of opening a PR.
+  0 - ran fine, report written (new_stores/needs_manual_lookup may be empty)
+  2 - Home Depot's own site returned nothing AND the OpenStreetMap
+      cross-check also came back empty/failed -- almost certainly means
+      something broke (site structure changed, both sources blocked)
+      rather than that zero stores exist anywhere. The workflow treats
+      this as a hard failure and sends an alert instead of opening a PR.
 """
 
 from __future__ import annotations
@@ -196,6 +203,63 @@ def parse_store_page(url: str) -> dict | None:
     return None
 
 
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_QUERY = """
+[out:json][timeout:180];
+area["ISO3166-1"="US"][admin_level=2]->.us;
+area["ISO3166-1"="CA"][admin_level=2]->.ca;
+area["ISO3166-1"="MX"][admin_level=2]->.mx;
+(
+  nwr["shop"="doityourself"]["name"~"Home Depot",i](area.us);
+  nwr["shop"="doityourself"]["name"~"Home Depot",i](area.ca);
+  nwr["shop"="doityourself"]["name"~"Home Depot",i](area.mx);
+);
+out center tags;
+"""
+OSM_COUNTRY_MAP = {"US": "USA", "CA": "CAN", "MX": "MEX"}
+
+
+def discover_osm_candidates(failures: list[str]) -> list[dict]:
+    """Cross-reference against OpenStreetMap's Overpass API: free, no key or
+    billing, not behind Akamai, and runs regardless of whether Home Depot's
+    own site cooperated this run. Coverage of the actual Home Depot store
+    number (an addr `ref` tag some mappers add) is inconsistent -- a
+    candidate without one is reported for manual lookup, never guessed at.
+    """
+    try:
+        resp = requests.post(OVERPASS_URL, data={"data": OVERPASS_QUERY}, timeout=200)
+        resp.raise_for_status()
+        elements = resp.json().get("elements", [])
+    except Exception as e:  # noqa: BLE001
+        failures.append(f"OpenStreetMap/Overpass cross-check failed ({e})")
+        return []
+
+    candidates = []
+    for el in elements:
+        tags = el.get("tags", {})
+        street = " ".join(p for p in [tags.get("addr:housenumber"), tags.get("addr:street")] if p).strip()
+        if not street or not tags.get("addr:postcode"):
+            continue
+        country_code = (tags.get("addr:country") or "").strip().upper()
+        ref = re.sub(r"\D", "", tags.get("ref", "") or "")
+        candidates.append(
+            {
+                "storeNumber": ref.zfill(4) if ref else None,
+                "storeName": tags.get("name", "The Home Depot"),
+                "streetAddress": street,
+                "city": (tags.get("addr:city") or "").strip(),
+                "state": (tags.get("addr:state") or "").strip(),
+                "zip": (tags.get("addr:postcode") or "").strip(),
+                "country": OSM_COUNTRY_MAP.get(country_code, country_code or None),
+            }
+        )
+    return candidates
+
+
+def _addr_key(entry: dict) -> tuple:
+    return (entry.get("zip", "").strip().lower(), entry.get("streetAddress", "").strip().lower())
+
+
 def main() -> None:
     data = load_stores()
     existing_numbers = set(data.keys())
@@ -238,6 +302,24 @@ def main() -> None:
     finally:
         close_browser()
 
+    # OpenStreetMap cross-check: runs every time, independent of whether
+    # Home Depot's own site cooperated above. Never overwrites a store
+    # Home Depot's own site already found this run -- that data has a
+    # confirmed real store number, OSM's ref tag is a distant second best.
+    existing_addr_keys = {_addr_key(v) for v in data.values()}
+    new_entry_addr_keys = {_addr_key(v) for v in new_entries.values()}
+    needs_manual_lookup: list[dict] = []
+
+    for cand in discover_osm_candidates(failures):
+        key = _addr_key(cand)
+        if key in existing_addr_keys or key in new_entry_addr_keys:
+            continue  # already tracked, or already found via Home Depot itself this run
+        if cand["storeNumber"] and cand["country"] and cand["storeNumber"] not in existing_numbers:
+            new_entries[cand["storeNumber"]] = {k: v for k, v in cand.items()}
+            new_entry_addr_keys.add(key)
+        else:
+            needs_manual_lookup.append(cand)
+
     if new_entries:
         data.update(new_entries)
         save_stores(data)
@@ -246,6 +328,7 @@ def main() -> None:
         json.dumps(
             {
                 "new_stores": new_entries,
+                "needs_manual_lookup": needs_manual_lookup,
                 "failures": failures,
                 "us_urls_scanned": len(us_urls),
                 "ca_urls_scanned": len(ca_urls),
@@ -254,12 +337,16 @@ def main() -> None:
         )
     )
 
-    print(f"Found {len(new_entries)} new store(s); {len(failures)} failure(s) logged.")
+    print(
+        f"Found {len(new_entries)} new store(s), "
+        f"{len(needs_manual_lookup)} candidate(s) needing manual lookup, "
+        f"{len(failures)} failure(s) logged."
+    )
 
-    if not us_urls and not ca_urls:
-        # Both discovery paths came back empty -- treat as "something broke"
-        # rather than "Home Depot has zero stores", so the workflow alerts
-        # instead of silently no-opping forever.
+    if not us_urls and not ca_urls and not new_entries and not needs_manual_lookup and failures:
+        # Home Depot's own site failed AND OSM found nothing usable either --
+        # treat as "something broke" rather than "zero stores exist", so the
+        # workflow alerts instead of silently no-opping forever.
         sys.exit(2)
 
 
