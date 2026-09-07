@@ -24,19 +24,23 @@ This repo exists to store and maintain the normalized Home Depot store directory
 
 ## Monthly store sync (automated)
 
-`.github/workflows/monthly-store-sync.yml` runs on the 1st of each month (and can be run manually via workflow_dispatch). `scraper/sync_stores.py` checks Home Depot's own sitemap for US/Canada store URLs not yet in `stores.json`, cross-checks OpenStreetMap's Overpass API for Home Depot locations (a source that isn't behind Akamai) not yet in the file, opens a pull request with anything it can fully confirm, and emails a report to chance@titanwft.net either way.
+`.github/workflows/monthly-store-sync.yml` runs on the 1st of each month (and can be run manually via workflow_dispatch). `scraper/sync_stores.py` checks three independent sources for Home Depot locations not yet in `stores.json`, opens a pull request with anything it can fully confirm, and emails a report to chance@titanwft.net either way:
+
+1. **Home Depot's own sitemap** (`homedepot.com`/`stores.homedepot.ca`) — the single most authoritative source when it's reachable, but it sits behind Akamai Bot Manager (see below) and can be blocked.
+2. **Overture Maps Foundation's public places dataset** — an open data lake (Parquet on S3, `s3://overturemaps-us-west-2`) published specifically for bulk/automated consumption, not a live API that treats crawling as abuse. In practice this is the most reliable and complete source: the large majority of its US/Canada Home Depot listings carry a `homedepot.com` store URL with the real store number embedded, obtained independently of homedepot.com itself. No API key, no billing, no rate limiting tuned against cloud CI traffic.
+3. **OpenStreetMap's Overpass API** — free, no key, kept as an extra cross-check. Store numbers here depend on an optional `ref` tag some mappers add, so it's less complete than Overture.
 
 **Required repo secrets** (Settings -> Secrets and variables -> Actions):
 - `STORE_SYNC_SMTP_HOST`, `STORE_SYNC_SMTP_PORT`, `STORE_SYNC_SMTP_USER`, `STORE_SYNC_SMTP_PASS` — SMTP credentials the workflow sends the report through.
 
-**Why there's no browser automation here:** Home Depot's site runs Akamai Bot Manager, and this was tested for real (not assumed) across a real, separate scraping project attempting Playwright, plain HTTP, and puppeteer-extra-plugin-stealth with a fully rendered browser — every technique got served the same soft-block error page. A browser-automation fallback would cost real CI time for effectively no chance of working, so this only ever makes plain HTTP requests, which do work for the sitemap (a machine-readable endpoint most sites don't wall off) even though the individual store pages sometimes still get blocked.
+**Why there's no browser automation against homedepot.com:** its site runs Akamai Bot Manager, tested for real (not assumed) across a separate scraping project that tried Playwright, plain HTTP, and puppeteer-extra-plugin-stealth with a fully rendered browser — every technique got served the same soft-block error page. A browser-automation fallback would cost real CI time for effectively no chance of working, so `sync_stores.py` only ever makes plain HTTP requests to homedepot.com, which work for the sitemap (a machine-readable endpoint most sites don't wall off) even though the individual store pages sometimes still get blocked.
 
 **How the "can't fully confirm" cases are handled, not guessed:**
-- A store number is Home Depot's own internal identifier — no third-party source (OpenStreetMap included) is authoritative on it. A candidate address without one is emailed under "needs manual lookup" rather than invented.
+- A store number is Home Depot's own internal identifier — no third-party source is authoritative on it. A candidate address without one (most commonly Mexico locations, which link only the generic homedepot.com.mx domain rather than a per-store page) is emailed under "needs manual lookup" rather than invented.
 - If Home Depot's sitemap lists a store URL not in `stores.json` but the individual page is blocked, the store *number* is still confirmed (it's embedded in the URL itself) even though the address isn't — that goes into the same manual-lookup list with a direct link, since a human clicking it isn't blocked the way the automation is.
-- Typical month: a short "no new stores" email, since Home Depot doesn't open many new locations. Expect the occasional manual-lookup item, not a fully hands-off pipeline — that ceiling is a property of Home Depot's site, not something scriptable around it.
+- Overture and OSM candidates are matched against existing entries by both store number and address (zip + street) — the latter because different sources format street suffixes differently (e.g. "Ave" vs "Avenue"), so number is the more reliable de-duplication key.
 
-**Known limitation:** Mexico has no direct Home Depot source (homedepot.com.mx's structure hasn't been mapped) — its only coverage is the OpenStreetMap cross-check.
+**Known limitation:** Mexico has no confirmed-store-number source at all yet — Overture's Mexico listings don't carry a per-store URL, and homedepot.com.mx's own structure hasn't been mapped. Its stores show up under "needs manual lookup" until a source that actually exposes their store numbers is found.
 
 ## Website
 

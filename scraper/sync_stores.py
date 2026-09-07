@@ -5,17 +5,29 @@ Finds Home Depot store location pages published by Home Depot for the US
 (homedepot.com) and Canada (stores.homedepot.ca), compares their store
 numbers against stores.json, and appends any genuinely new stores in the
 file's existing sort order (country: USA, CAN, MEX; then state/province;
-then streetAddress). Every run also cross-checks OpenStreetMap's Overpass
-API (free, no key, not behind Akamai) for Home Depot locations not yet in
-stores.json -- a candidate with a usable store number (an OSM `ref` tag)
-gets added the same way; one without gets reported for manual lookup
-rather than guessed at, since OSM is not the authority on Home Depot's own
-internal store numbers.
+then streetAddress).
+
+Every run also cross-checks two independent, non-Akamai-protected sources
+that don't care about automated/bulk access the way Home Depot's own site
+does:
+  - Overture Maps Foundation's public places dataset (Parquet on S3, no
+    API key, published specifically for bulk/automated consumption). In
+    practice this is the most complete source: most US/Canada entries
+    carry a homedepot.com store URL with the real store number embedded,
+    sourced independently of homedepot.com itself.
+  - OpenStreetMap's Overpass API (free, no key). Store numbers here come
+    from an optional `ref` tag some mappers add -- less consistent than
+    Overture, kept as an extra cross-check.
+A candidate with a confirmed store number gets added the same way a
+Home Depot-sourced find does; one without gets reported for manual lookup
+rather than guessed at, since neither source is authoritative on Home
+Depot's own internal store numbers.
 
 This intentionally does NOT touch existing entries -- it only adds ones
 whose storeNumber isn't already a key in stores.json. It also does not
-attempt to discover Mexico stores via homedepot.com itself;
-homedepot.com.mx's site structure has not been verified -- Mexico
+attempt to discover Mexico stores via homedepot.com itself (its site
+structure has not been verified) or via Overture (Mexico listings there
+only link the generic homedepot.com.mx domain, no store number) -- Mexico
 coverage currently comes only from the OpenStreetMap cross-check.
 
 Home Depot's human-facing pages sit behind Akamai Bot Manager, confirmed
@@ -62,8 +74,8 @@ REQUEST_TIMEOUT_SECONDS = 20
 
 COUNTRY_ORDER = {"USA": 0, "CAN": 1, "MEX": 2}
 
-US_STORE_URL_RE = re.compile(r"/l/[^/]+/[A-Z]{2}/[^/]+/[\w-]+/(\d{3,5})(?:/|$)")
-CA_STORE_URL_RE = re.compile(r"-([a-z]{2})-hs(\d{3,5})\.html$")
+US_STORE_URL_RE = re.compile(r"/l/[^/]+/[A-Z]{2}/[^/]+/[\w-]+/(\d{3,5})(?:[/?]|$)")
+CA_STORE_URL_RE = re.compile(r"-([a-z]{2})-(?:hs)?(\d{3,5})\.html")
 
 
 def fetch(url: str) -> str:
@@ -285,6 +297,120 @@ def discover_osm_candidates(failures: list[str]) -> list[dict]:
     return candidates
 
 
+OVERTURE_BUCKET = "overturemaps-us-west-2"
+OVERTURE_MIN_CONFIDENCE = 0.7
+
+
+def discover_overture_release() -> str | None:
+    """Overture Maps publishes a new dated release monthly to a public S3
+    bucket -- list it directly (plain, unauthenticated HTTPS GET against
+    S3's REST API) rather than hardcode a release string that goes stale."""
+    try:
+        resp = requests.get(
+            f"https://{OVERTURE_BUCKET}.s3.amazonaws.com/",
+            params={"list-type": "2", "prefix": "release/", "delimiter": "/"},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+        ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+        prefixes = [
+            p.find("s3:Prefix", ns).text
+            for p in root.findall("s3:CommonPrefixes", ns)
+            if p.find("s3:Prefix", ns) is not None
+        ]
+        releases = sorted(p.strip("/").split("/")[-1] for p in prefixes if p)
+        return releases[-1] if releases else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+OVERTURE_COUNTRY_MAP = {"US": "USA", "CA": "CAN", "MX": "MEX"}
+
+
+def discover_overture_candidates(failures: list[str]) -> list[dict]:
+    """Cross-reference against Overture Maps Foundation's public places
+    dataset: an open data lake (Parquet on S3/Azure) explicitly published
+    for bulk/automated consumption -- no API key, no per-IP throttling like
+    a live API, not something that treats crawling as abuse. Far more
+    complete than OpenStreetMap for this brand in practice: most US/Canada
+    entries carry a homedepot.com store URL with the real store number
+    embedded, sourced independently of Home Depot's own (Akamai-protected)
+    site. Mexico entries typically only link the generic homedepot.com.mx
+    domain, no store number -- those go to manual lookup like everything
+    else without a confirmed number.
+    """
+    try:
+        import pyarrow.dataset as pa_ds
+        import pyarrow.fs as pa_fs
+        import pyarrow.compute as pa_compute
+    except ImportError as e:
+        failures.append(f"Overture cross-check skipped -- pyarrow not installed ({e})")
+        return []
+
+    release = discover_overture_release()
+    if not release:
+        failures.append("Overture cross-check failed -- could not determine the latest release version")
+        return []
+
+    try:
+        fs = pa_fs.S3FileSystem(region="us-west-2", anonymous=True)
+        path = f"{OVERTURE_BUCKET}/release/{release}/theme=places/type=place"
+        dataset = pa_ds.dataset(path, filesystem=fs, format="parquet", partitioning="hive")
+        scanner = dataset.scanner(
+            columns=["names", "addresses", "websites", "confidence"],
+            filter=(pa_compute.field("names", "primary") == "The Home Depot"),
+        )
+        table = scanner.to_table()
+    except Exception as e:  # noqa: BLE001
+        failures.append(f"Overture cross-check failed ({e})")
+        return []
+
+    best_by_number: dict[str, dict] = {}
+    unconfirmed: list[dict] = []
+
+    for row in table.to_pylist():
+        addr_list = row.get("addresses") or []
+        if not addr_list or not addr_list[0].get("freeform"):
+            continue
+        addr = addr_list[0]
+        confidence = row.get("confidence") or 0.0
+        country_code = (addr.get("country") or "").upper()
+        country = OVERTURE_COUNTRY_MAP.get(country_code)
+        websites = row.get("websites") or []
+
+        store_number = None
+        for url in websites:
+            m = US_STORE_URL_RE.search(url) or CA_STORE_URL_RE.search(url)
+            if m:
+                store_number = m.group(m.lastindex).zfill(4)
+                break
+
+        candidate = {
+            "storeNumber": store_number,
+            "storeName": row.get("names", {}).get("primary") or "The Home Depot",
+            "streetAddress": addr["freeform"].strip(),
+            "city": (addr.get("locality") or "").strip(),
+            "state": (addr.get("region") or "").strip(),
+            "zip": (addr.get("postcode") or "").split("-")[0].strip(),
+            "country": country,
+            "confidence": confidence,
+            "url": websites[0] if websites else None,
+        }
+
+        if not candidate["state"] or not candidate["zip"] or not country:
+            continue
+
+        if store_number and confidence >= OVERTURE_MIN_CONFIDENCE:
+            existing = best_by_number.get(store_number)
+            if existing is None or confidence > existing["confidence"]:
+                best_by_number[store_number] = candidate
+        else:
+            unconfirmed.append(candidate)
+
+    return list(best_by_number.values()) + unconfirmed
+
+
 def _addr_key(entry: dict) -> tuple:
     return (entry.get("zip", "").strip().lower(), entry.get("streetAddress", "").strip().lower())
 
@@ -354,12 +480,20 @@ def main() -> None:
     existing_addr_keys = {_addr_key(v) for v in data.values()}
     new_entry_addr_keys = {_addr_key(v) for v in new_entries.values()}
 
-    for cand in discover_osm_candidates(failures):
+    STORE_FIELDS = {"storeNumber", "storeName", "streetAddress", "city", "state", "zip", "country"}
+
+    for cand in discover_overture_candidates(failures) + discover_osm_candidates(failures):
         key = _addr_key(cand)
-        if key in existing_addr_keys or key in new_entry_addr_keys:
-            continue  # already tracked, or already found via Home Depot itself this run
-        if cand["storeNumber"] and cand["country"] and cand["storeNumber"] not in existing_numbers:
-            new_entries[cand["storeNumber"]] = {k: v for k, v in cand.items() if k != "url"}
+        already_tracked = (
+            key in existing_addr_keys
+            or key in new_entry_addr_keys
+            or cand["storeNumber"] in existing_numbers  # address text can differ (Ave vs Avenue) even
+            or cand["storeNumber"] in new_entries  # when the store number itself already matches
+        )
+        if already_tracked:
+            continue
+        if cand["storeNumber"] and cand["country"]:
+            new_entries[cand["storeNumber"]] = {k: v for k, v in cand.items() if k in STORE_FIELDS}
             new_entry_addr_keys.add(key)
         else:
             needs_manual_lookup.append(cand)
