@@ -18773,6 +18773,15 @@
     "zip": "L1N 9K6",
     "country": "CAN"
   },
+  "7256": {
+    "storeName": "The Home Depot: Home Improvement & Hardware Store in Stoney Creek.",
+    "streetAddress": "1775 Stone Church Road East",
+    "city": "Stoney Creek",
+    "state": "ON",
+    "zip": "L8J 0B4",
+    "storeNumber": "7256",
+    "country": "CAN"
+  },
   "7030": {
     "storeNumber": "7030",
     "storeName": "The Home Depot",
@@ -19446,6 +19455,15 @@
     "city": "Gatineau",
     "state": "QC",
     "zip": "J8P 6M7",
+    "country": "CAN"
+  },
+  "7162": {
+    "storeName": "The Home Depot: Home Improvement & Hardware Store in Qu\u00e9bec.",
+    "streetAddress": "300 rue Bouvier",
+    "city": "Qu\u00e9bec",
+    "state": "QC",
+    "zip": "G2J 1R8",
+    "storeNumber": "7162",
     "country": "CAN"
   },
   "7169": {
