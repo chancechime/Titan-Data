@@ -1388,7 +1388,7 @@
   "1052": {
     "storeNumber": "1052",
     "storeName": "The Home Depot",
-    "streetAddress": "1551 Froom Ranch",
+    "streetAddress": "1551 Froom Ranch Way",
     "city": "San Luis Obispo",
     "state": "CA",
     "zip": "93405",
@@ -2207,7 +2207,7 @@
   "6637": {
     "storeNumber": "6637",
     "storeName": "The Home Depot",
-    "streetAddress": "3400 West Florida",
+    "streetAddress": "3400 West Florida Avenue",
     "city": "Hemet",
     "state": "CA",
     "zip": "92545",
@@ -5969,7 +5969,7 @@
   "0159": {
     "storeNumber": "0159",
     "storeName": "The Home Depot",
-    "streetAddress": "650 Ponce De Leon",
+    "streetAddress": "650 Ponce De Leon Avenue Northeast",
     "city": "Atlanta",
     "state": "GA",
     "zip": "30308",
@@ -6014,7 +6014,7 @@
   "0137": {
     "storeNumber": "0137",
     "storeName": "The Home Depot",
-    "streetAddress": "875 Shugart",
+    "streetAddress": "875 Shugart Road",
     "city": "Dalton",
     "state": "GA",
     "zip": "30720",
@@ -9578,7 +9578,7 @@
   "3032": {
     "storeNumber": "3032",
     "storeName": "The Home Depot",
-    "streetAddress": "1131 West Gannon",
+    "streetAddress": "1131 West Gannon Drive",
     "city": "Festus",
     "state": "MO",
     "zip": "63028",
@@ -14537,7 +14537,7 @@
   "0744": {
     "storeNumber": "0744",
     "storeName": "The Home Depot",
-    "streetAddress": "1930 West Andrew Johnson",
+    "streetAddress": "1930 West Andrew Johnson Highway",
     "city": "Morristown",
     "state": "TN",
     "zip": "37814",
@@ -15806,7 +15806,7 @@
   "0561": {
     "storeNumber": "0561",
     "storeName": "The Home Depot",
-    "streetAddress": "4009 North Midland",
+    "streetAddress": "4009 North Midland Drive",
     "city": "Midland",
     "state": "TX",
     "zip": "79707",
@@ -18774,7 +18774,7 @@
     "country": "CAN"
   },
   "7256": {
-    "storeName": "The Home Depot: Home Improvement & Hardware Store in Stoney Creek.",
+    "storeName": "The Home Depot",
     "streetAddress": "1775 Stone Church Road East",
     "city": "Stoney Creek",
     "state": "ON",
@@ -19458,7 +19458,7 @@
     "country": "CAN"
   },
   "7162": {
-    "storeName": "The Home Depot: Home Improvement & Hardware Store in Qu\u00e9bec.",
+    "storeName": "The Home Depot",
     "streetAddress": "300 rue Bouvier",
     "city": "Qu\u00e9bec",
     "state": "QC",
