@@ -2711,8 +2711,8 @@
   "1084": {
     "storeNumber": "1084",
     "storeName": "The Home Depot",
-    "streetAddress": "6140 Hamner",
-    "city": "Eastvale",
+    "streetAddress": "6140 Hamner Avenue",
+    "city": "Mira Loma",
     "state": "CA",
     "zip": "91752",
     "country": "USA"
@@ -6140,7 +6140,7 @@
   "2113": {
     "storeNumber": "2113",
     "storeName": "The Home Depot",
-    "streetAddress": "1850 Lincolnway",
+    "streetAddress": "1850 Lincoln Way",
     "city": "Clinton",
     "state": "IA",
     "zip": "52732",
@@ -9516,7 +9516,7 @@
     "storeNumber": "2810",
     "storeName": "The Home Depot",
     "streetAddress": "8334 Tamarack Village",
-    "city": "Woobury",
+    "city": "Woodbury",
     "state": "MN",
     "zip": "55125",
     "country": "USA"
