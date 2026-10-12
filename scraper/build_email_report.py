@@ -54,9 +54,18 @@ def _lookup_row(v: dict) -> str:
 </tr>"""
 
 
+COMPLETION_ROW = """<tr>
+  <td style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;font-family:monospace;">{storeNumber}</td>
+  <td style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;">{before}</td>
+  <td style="padding:8px 10px;border-bottom:1px solid #eee;font-size:13px;">{after}</td>
+</tr>"""
+
+
 def render(report: dict, commit_url: str) -> str:
     new_stores = report.get("new_stores", {})
     needs_manual_lookup = report.get("needs_manual_lookup", [])
+    address_completions = report.get("address_completions", [])
+    needs_address_lookup = report.get("needs_address_lookup", [])
     failures = report.get("failures", [])
 
     if new_stores:
@@ -86,6 +95,38 @@ def render(report: dict, commit_url: str) -> str:
             '<p style="font-size:14px;">No new stores found this month. '
             "<code>stores.json</code> is unchanged.</p>"
         )
+
+    if address_completions:
+        rows = "".join(COMPLETION_ROW.format(**c) for c in address_completions)
+        body += f"""
+        <p style="font-size:14px;margin-top:20px;">Completed <strong>{len(address_completions)}</strong>
+        short street address(es) with the US Census geocoder (house number and zip matched, and the
+        street starts with the same words):</p>
+        <table style="width:100%;border-collapse:collapse;">
+          <tr>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:#888;border-bottom:2px solid #eee;">Store #</th>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:#888;border-bottom:2px solid #eee;">Before</th>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:#888;border-bottom:2px solid #eee;">After</th>
+          </tr>
+          {rows}
+        </table>
+        """
+
+    if needs_address_lookup:
+        rows = "".join(ROW.format(**v) for v in needs_address_lookup)
+        body += f"""
+        <p style="font-size:14px;margin-top:20px;"><strong>{len(needs_address_lookup)}</strong> new
+        store(s) have a short street address (no Avenue, Road, ...) that the Census geocoder couldn't
+        confirm, so they were added as-is. Look up the full street and fix it by hand:</p>
+        <table style="width:100%;border-collapse:collapse;">
+          <tr>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:#888;border-bottom:2px solid #eee;">Store #</th>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:#888;border-bottom:2px solid #eee;">Address</th>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:#888;border-bottom:2px solid #eee;">Country</th>
+          </tr>
+          {rows}
+        </table>
+        """
 
     if needs_manual_lookup:
         rows = "".join(_lookup_row(v) for v in needs_manual_lookup)

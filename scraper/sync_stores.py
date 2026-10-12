@@ -62,6 +62,7 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import urlencode
 
 import requests
 from bs4 import BeautifulSoup
@@ -83,6 +84,13 @@ def has_full_details(entry: dict) -> bool:
     non-empty -- storeNumber and an address alone aren't enough. Anything
     incomplete goes to manual lookup instead, never partially included."""
     return all(str(entry.get(f) or "").strip() for f in REQUIRED_STORE_FIELDS)
+
+
+def clean_store_name(name: str | None) -> str:
+    """Cut a name at its first colon. Store pages' JSON-LD names can carry
+    marketing text after one ("The Home Depot: Home Improvement & Hardware
+    Store in Stoney Creek.")."""
+    return str(name or "").split(":", 1)[0].strip()
 
 US_STORE_URL_RE = re.compile(r"/l/[^/]+/[A-Z]{2}/[^/]+/[\w-]+/(\d{3,5})(?:[/?]|$)")
 CA_STORE_URL_RE = re.compile(r"-([a-z]{2})-(?:hs)?(\d{3,5})\.html")
@@ -236,7 +244,7 @@ def parse_store_page(url: str) -> dict | None:
             addr = obj.get("address")
             if isinstance(addr, dict) and addr.get("streetAddress"):
                 return {
-                    "storeName": obj.get("name", "The Home Depot"),
+                    "storeName": clean_store_name(obj.get("name", "The Home Depot")),
                     "streetAddress": (addr.get("streetAddress") or "").strip(),
                     "city": (addr.get("addressLocality") or "").strip(),
                     "state": (addr.get("addressRegion") or "").strip(),
@@ -295,7 +303,7 @@ def discover_osm_candidates(failures: list[str]) -> list[dict]:
         candidates.append(
             {
                 "storeNumber": ref.zfill(4) if ref else None,
-                "storeName": tags.get("name", "The Home Depot"),
+                "storeName": clean_store_name(tags.get("name", "The Home Depot")),
                 "streetAddress": street,
                 "city": (tags.get("addr:city") or "").strip(),
                 "state": (tags.get("addr:state") or "").strip(),
@@ -421,6 +429,144 @@ def discover_overture_candidates(failures: list[str]) -> list[dict]:
     return list(best_by_number.values()) + unconfirmed
 
 
+CENSUS_GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
+
+# Words that make a US streetAddress complete enough for Google Maps. One
+# with none of these, like "650 Ponce De Leon", gets finished by the free US
+# Census geocoder (no key). Words that are as often part of a name as a type
+# (Ranch, Village, Heights, Center) are left out on purpose.
+STREET_TYPE_WORDS = set(
+    """
+    alley aly avenida avenue ave av beltway blvd boulevard broadway bypass byp calle camino causeway cswy
+    circle cir connector court ct cove cv crossing xing cutoff drive dr expressway expy extension ext freeway
+    fwy frontage highway hwy interstate lane ln loop mall parkway pkwy pky pass path pike place pl plaza plz
+    road rd route rte rt row run square sq street st str terrace ter thruway trail trl trails turnpike tpke
+    via walk way wy
+    """.split()
+)
+
+DIRECTION_NAMES = {
+    "n": "North", "s": "South", "e": "East", "w": "West",
+    "ne": "Northeast", "nw": "Northwest", "se": "Southeast", "sw": "Southwest",
+}
+
+# USPS standard suffix abbreviations (what the geocoder returns as
+# suffixType), written out the way stores.json spells them. A suffix not
+# listed here leaves the store unchanged rather than half-abbreviated.
+SUFFIX_TYPE_NAMES = {
+    "ALY": "Alley", "ANX": "Annex", "AVE": "Avenue", "BLVD": "Boulevard", "BND": "Bend", "BR": "Branch",
+    "BYP": "Bypass", "CIR": "Circle", "CMN": "Common", "CMNS": "Commons", "CORS": "Corners", "CRES": "Crescent",
+    "CRK": "Creek", "CRST": "Crest", "CSWY": "Causeway", "CT": "Court", "CTR": "Center", "CURV": "Curve",
+    "CV": "Cove", "CYN": "Canyon", "DR": "Drive", "EXPY": "Expressway", "EXT": "Extension", "FRY": "Ferry",
+    "FWY": "Freeway", "GLN": "Glen", "GRN": "Green", "GRV": "Grove", "GTWY": "Gateway", "HBR": "Harbor",
+    "HL": "Hill", "HOLW": "Hollow", "HTS": "Heights", "HWY": "Highway", "JCT": "Junction", "KNL": "Knoll",
+    "LK": "Lake", "LN": "Lane", "LNDG": "Landing", "LOOP": "Loop", "MALL": "Mall", "MDW": "Meadow",
+    "MDWS": "Meadows", "ML": "Mill", "OVAL": "Oval", "PARK": "Park", "PASS": "Pass", "PATH": "Path",
+    "PIKE": "Pike", "PKWY": "Parkway", "PL": "Place", "PLZ": "Plaza", "PT": "Point", "RD": "Road",
+    "RDG": "Ridge", "RIV": "River", "RNCH": "Ranch", "ROW": "Row", "RTE": "Route", "RUN": "Run",
+    "SKWY": "Skyway", "SPUR": "Spur", "SQ": "Square", "ST": "Street", "STA": "Station", "TER": "Terrace",
+    "TPKE": "Turnpike", "TRCE": "Trace", "TRL": "Trail", "VIS": "Vista", "VLG": "Village", "VLY": "Valley",
+    "VW": "View", "WALK": "Walk", "WAY": "Way", "XING": "Crossing",
+}
+
+
+def is_short_street(street: str) -> bool:
+    """True for a street with a house number but no street type, like
+    "650 Ponce De Leon". A number in the street name means a numbered route
+    (I-55, FM 1960) or a Utah grid street (11400 South), which are complete;
+    an ordinal like "13th" doesn't count as one."""
+    words = [w for w in re.split(r"[\s,;./-]+", street.lower()) if w]
+    if len(words) < 2 or not words[0][0].isdigit():
+        return False
+    return not any(
+        w in STREET_TYPE_WORDS or (re.search(r"\d", w) and not re.fullmatch(r"\d+(st|nd|rd|th)", w))
+        for w in words[1:]
+    )
+
+
+def census_complete_street(entry: dict) -> str | None:
+    """Look a short street address up in the Census geocoder and return it
+    with the missing words added, e.g. "650 Ponce De Leon" -> "650 Ponce De
+    Leon Avenue Northeast". The words we already have are kept as written.
+    Returns None unless the top match has the same house number and zip and
+    its street starts with the same words."""
+    query = f'{entry["streetAddress"]}, {entry["city"]}, {entry["state"]} {entry["zip"]}'
+    url = f"{CENSUS_GEOCODER_URL}?" + urlencode({"address": query, "benchmark": "Public_AR_Current", "format": "json"})
+    matches = (json.loads(fetch(url)).get("result") or {}).get("addressMatches") or []
+    if not matches:
+        return None
+    match = matches[0]
+    parts = match.get("addressComponents") or {}
+
+    house_number, *ours = entry["streetAddress"].split()
+    if (match.get("matchedAddress") or "").split(" ", 1)[0].lower() != house_number.lower():
+        return None
+    if (parts.get("zip") or "") != entry["zip"].strip()[:5]:
+        return None
+    # Route prefixes and qualifiers ("US HWY", "OLD", "BUS") have no
+    # written-out form we can trust here.
+    if parts.get("preQualifier") or parts.get("preType") or parts.get("suffixQualifier"):
+        return None
+
+    pre_dir = (parts.get("preDirection") or "").lower()
+    suffix_type = (parts.get("suffixType") or "").upper()
+    suffix_dir = (parts.get("suffixDirection") or "").lower()
+    if (pre_dir and pre_dir not in DIRECTION_NAMES) or (suffix_dir and suffix_dir not in DIRECTION_NAMES):
+        return None
+    if suffix_type and suffix_type not in SUFFIX_TYPE_NAMES:
+        return None
+
+    theirs = (
+        ([DIRECTION_NAMES[pre_dir]] if pre_dir else [])
+        + ["-".join(p.capitalize() for p in w.split("-")) for w in (parts.get("streetName") or "").split()]
+        + ([SUFFIX_TYPE_NAMES[suffix_type]] if suffix_type else [])
+        + ([DIRECTION_NAMES[suffix_dir]] if suffix_dir else [])
+    )
+    ours_norm = [DIRECTION_NAMES.get(w.lower().strip(".,"), w.strip(".,")).lower() for w in ours]
+    if [w.lower() for w in theirs[: len(ours)]] != ours_norm:
+        return None
+    return " ".join([entry["streetAddress"].strip(), *theirs[len(ours) :]])
+
+
+def complete_short_addresses(entries: dict, failures: list[str]) -> tuple[list[dict], list[dict]]:
+    """Finish short US street addresses in place so the calendar location
+    Titan builds from them resolves in Google Maps. Returns (completed,
+    unmatched). Anything the geocoder can't confirm is left as it was and
+    returned for manual lookup."""
+    completed: list[dict] = []
+    unmatched: list[dict] = []
+    for entry in entries.values():
+        if entry.get("country") != "USA" or not is_short_street(entry.get("streetAddress") or ""):
+            continue
+        try:
+            street = census_complete_street(entry)
+        except Exception as e:  # noqa: BLE001
+            failures.append(f"Census geocoder lookup failed for store #{entry['storeNumber']} ({e})")
+            continue
+        if street is None:
+            unmatched.append({k: entry[k] for k in REQUIRED_STORE_FIELDS})
+        elif street != entry["streetAddress"]:
+            completed.append({"storeNumber": entry["storeNumber"], "before": entry["streetAddress"], "after": street})
+            entry["streetAddress"] = street
+    return completed, unmatched
+
+
+def backfill_addresses() -> None:
+    """One-off: run complete_short_addresses() over every store already in
+    stores.json, not just a sync run's new ones."""
+    data = load_stores()
+    failures: list[str] = []
+    completed, unmatched = complete_short_addresses(data, failures)
+    if completed:
+        save_stores(data)
+    for c in completed:
+        print(f'Completed #{c["storeNumber"]}: "{c["before"]}" -> "{c["after"]}"')
+    for u in unmatched:
+        print(f'No match, look up by hand: #{u["storeNumber"]} {u["streetAddress"]}, {u["city"]}, {u["state"]} {u["zip"]}')
+    for f in failures:
+        print(f)
+
+
 def _addr_key(entry: dict) -> tuple:
     return (entry.get("zip", "").strip().lower(), entry.get("streetAddress", "").strip().lower())
 
@@ -507,6 +653,8 @@ def main() -> None:
         else:
             needs_manual_lookup.append(cand)
 
+    address_completions, needs_address_lookup = complete_short_addresses(new_entries, failures)
+
     if new_entries:
         data.update(new_entries)
         save_stores(data)
@@ -516,6 +664,8 @@ def main() -> None:
             {
                 "new_stores": new_entries,
                 "needs_manual_lookup": needs_manual_lookup,
+                "address_completions": address_completions,
+                "needs_address_lookup": needs_address_lookup,
                 "failures": failures,
                 "us_urls_scanned": len(us_urls),
                 "ca_urls_scanned": len(ca_urls),
@@ -527,6 +677,7 @@ def main() -> None:
     print(
         f"Found {len(new_entries)} new store(s), "
         f"{len(needs_manual_lookup)} candidate(s) needing manual lookup, "
+        f"{len(address_completions)} short address(es) completed, "
         f"{len(failures)} failure(s) logged."
     )
 
@@ -538,4 +689,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if "--backfill-addresses" in sys.argv[1:]:
+        backfill_addresses()
+    else:
+        main()
