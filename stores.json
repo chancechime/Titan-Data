@@ -15704,6 +15704,15 @@
     "zip": "76543",
     "country": "USA"
   },
+  "6535": {
+    "storeNumber": "6535",
+    "storeName": "The Home Depot",
+    "streetAddress": "3245 S Preston Rd",
+    "city": "Celina",
+    "state": "TX",
+    "zip": "75009",
+    "country": "USA"
+  },
   "0553": {
     "storeNumber": "0553",
     "storeName": "The Home Depot",
@@ -16431,6 +16440,15 @@
     "city": "San Antonio",
     "state": "TX",
     "zip": "78249",
+    "country": "USA"
+  },
+  "6849": {
+    "storeNumber": "6849",
+    "storeName": "The Home Depot",
+    "streetAddress": "9334 E R L Thornton Fwy",
+    "city": "Dallas",
+    "state": "TX",
+    "zip": "75227",
     "country": "USA"
   },
   "8521": {
